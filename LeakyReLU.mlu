@@ -1,4 +1,4 @@
-//test
+//test2
 #include <bang.h>
 #include <torch/extension.h>
 #include <cnrt.h>
