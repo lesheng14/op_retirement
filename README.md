@@ -2,11 +2,13 @@
 
 赛事官网->https://openoperator.cn
 
+快捷监控->http://152.136.18.42:13000
+
 此仓库是openoperator赛事举办方提供的模板仓库。选手可以直接Fork此仓库作为自己队伍的仓库。
 
 ## Quick Start
 
-1. Fork此仓库
+1. Fork此仓库，将仓库可见范围设置为private，将bot帐号加入collaborators
 2. 点击`settings`->`webhooks`->`Add webhook`，配置webhook
    1. `Payload URL`填写`http://152.136.18.42:8000/webhook`
    2. `Content type`选择`application/json`
@@ -71,4 +73,4 @@
 1. 每次只评估少量题目
 2. 尽量在调试服务器debug，远程评估时通过阅读commit评论中的报错进行debug
 3. 系统只接收`main`分支的提交，所以请分时开发或者做好分支管理
-4. github评论是执行结束第一时间更新的，排行榜是周期性更新的，且只会记录团队历史最好成绩
+4. github评论是执行结束第一时间更新的，快捷监控可以查看目前评估进度，排行榜是周期性更新的，且只会记录团队历史最好成绩
