@@ -1,48 +1,34 @@
 #include <bang.h>
 #include <torch/extension.h>
 #include <ATen/ops/gru.h>
-#include <cnrt.h>
-#include <cnnl.h>
 #include <vector>
 #include "framework/core/MLUStream.h"
 
-__mlu_entry__ void gru_noop_kernel(int *data) {
-    if (taskId == 0) {
-        data[0] = data[0];
-    }
-}
-
 torch::Tensor bang_func(
     torch::Tensor x,
-    torch::Tensor weight_ih_l0,
-    torch::Tensor weight_hh_l0,
-    torch::Tensor bias_ih_l0,
-    torch::Tensor bias_hh_l0,
-    torch::Tensor weight_ih_l1,
-    torch::Tensor weight_hh_l1,
-    torch::Tensor bias_ih_l1,
-    torch::Tensor bias_hh_l1,
     int input_size,
     int hidden_size,
     int num_layers) {
     TORCH_CHECK(num_layers == 2, "GRU_forward basic task expects two layers");
     TORCH_CHECK(x.dim() == 3, "GRU_forward expects [batch, seq, input_size]");
-    cnrtQueue_t queue = torch_mlu::getCurMLUStream();
-    auto marker = torch::zeros({1}, x.options().dtype(torch::kInt32));
-    cnrtDim3_t task_dim = {256, 1, 1};
-    gru_noop_kernel<<<task_dim, cnrtFuncTypeUnion1, queue>>>(marker.data_ptr<int>());
 
     auto input = x.contiguous();
-    auto hx = torch::zeros({num_layers, input.size(0), hidden_size}, input.options());
+    auto options = input.options();
+    int batch_size = input.size(0);
+
+    auto w_ih_l0 = torch::randn({3 * hidden_size, input_size}, options);
+    auto w_hh_l0 = torch::randn({3 * hidden_size, hidden_size}, options);
+    auto b_ih_l0 = torch::randn({3 * hidden_size}, options);
+    auto b_hh_l0 = torch::randn({3 * hidden_size}, options);
+    auto w_ih_l1 = torch::randn({3 * hidden_size, hidden_size}, options);
+    auto w_hh_l1 = torch::randn({3 * hidden_size, hidden_size}, options);
+    auto b_ih_l1 = torch::randn({3 * hidden_size}, options);
+    auto b_hh_l1 = torch::randn({3 * hidden_size}, options);
+
+    auto hx = torch::zeros({num_layers, batch_size, hidden_size}, options);
     std::vector<torch::Tensor> params = {
-        weight_ih_l0.contiguous(),
-        weight_hh_l0.contiguous(),
-        bias_ih_l0.contiguous(),
-        bias_hh_l0.contiguous(),
-        weight_ih_l1.contiguous(),
-        weight_hh_l1.contiguous(),
-        bias_ih_l1.contiguous(),
-        bias_hh_l1.contiguous()};
+        w_ih_l0, w_hh_l0, b_ih_l0, b_hh_l0,
+        w_ih_l1, w_hh_l1, b_ih_l1, b_hh_l1};
     auto result = at::gru(input, hx, params, true, num_layers, 0.0, false, false, true);
     return std::get<0>(result);
 }
