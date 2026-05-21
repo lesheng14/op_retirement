@@ -56,9 +56,9 @@ torch::Tensor bang_func(
                 int oh = out_h0 + i * stride;
                 for (int j = 0; j < w_count; j++) {
                     int ow = out_w0 + j * stride;
-                    output.select(2, oh).select(3, ow)
+                    output.select(2, oh).select(2, ow)
                           .add_(contrib.select(1, h_start + i)
-                                       .select(2, w_start + j));
+                                       .select(1, w_start + j));
                 }
             }
         }
