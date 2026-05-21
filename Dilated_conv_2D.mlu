@@ -1,121 +1,4 @@
-#include <bang.h>
 #include <torch/extension.h>
-#include <cnrt.h>
-#include "framework/core/MLUStream.h"
-
-__mlu_entry__ void dilated_conv2d_kernel(
-    const float *input,
-    const float *weight,
-    float *output,
-    int batch,
-    int in_channels,
-    int out_channels,
-    int height,
-    int width,
-    int kernel_size,
-    int dilation,
-    int padding,
-    int height_out,
-    int width_out,
-    int total) {
-
-    int task_id = taskId;
-    int task_num = taskDim;
-    int per_task = total / task_num;
-    int remainder = total % task_num;
-    int start = task_id * per_task + (task_id < remainder ? task_id : remainder);
-    int count = per_task + (task_id < remainder ? 1 : 0);
-    int end = start + count;
-
-    for (int idx = start; idx < end; ++idx) {
-        int t = idx;
-        int ow = t % width_out;
-        t /= width_out;
-        int oh = t % height_out;
-        t /= height_out;
-        int oc = t % out_channels;
-        int n = t / out_channels;
-
-        float acc = 0.0f;
-        for (int ic = 0; ic < in_channels; ++ic) {
-            for (int kh = 0; kh < kernel_size; ++kh) {
-                int ih = oh + kh * dilation - padding;
-                if (ih < 0 || ih >= height) {
-                    continue;
-                }
-                for (int kw = 0; kw < kernel_size; ++kw) {
-                    int iw = ow + kw * dilation - padding;
-                    if (iw < 0 || iw >= width) {
-                        continue;
-                    }
-
-                    int input_offset = ((n * in_channels + ic) * height + ih) * width + iw;
-                    int weight_offset = ((oc * in_channels + ic) * kernel_size + kh) * kernel_size + kw;
-                    acc += input[input_offset] * weight[weight_offset];
-                }
-            }
-        }
-
-        output[idx] = acc;
-    }
-}
-
-__mlu_entry__ void dilated_conv2d_half_kernel(
-    const half *input,
-    const half *weight,
-    half *output,
-    int batch,
-    int in_channels,
-    int out_channels,
-    int height,
-    int width,
-    int kernel_size,
-    int dilation,
-    int padding,
-    int height_out,
-    int width_out,
-    int total) {
-
-    int task_id = taskId;
-    int task_num = taskDim;
-    int per_task = total / task_num;
-    int remainder = total % task_num;
-    int start = task_id * per_task + (task_id < remainder ? task_id : remainder);
-    int count = per_task + (task_id < remainder ? 1 : 0);
-    int end = start + count;
-
-    for (int idx = start; idx < end; ++idx) {
-        int t = idx;
-        int ow = t % width_out;
-        t /= width_out;
-        int oh = t % height_out;
-        t /= height_out;
-        int oc = t % out_channels;
-        int n = t / out_channels;
-
-        float acc = 0.0f;
-        for (int ic = 0; ic < in_channels; ++ic) {
-            for (int kh = 0; kh < kernel_size; ++kh) {
-                int ih = oh + kh * dilation - padding;
-                if (ih < 0 || ih >= height) {
-                    continue;
-                }
-                for (int kw = 0; kw < kernel_size; ++kw) {
-                    int iw = ow + kw * dilation - padding;
-                    if (iw < 0 || iw >= width) {
-                        continue;
-                    }
-
-                    int input_offset = ((n * in_channels + ic) * height + ih) * width + iw;
-                    int weight_offset = ((oc * in_channels + ic) * kernel_size + kh) * kernel_size + kw;
-                    acc += (float)input[input_offset] * (float)weight[weight_offset];
-                }
-            }
-        }
-
-        output[idx] = (half)acc;
-    }
-}
 
 torch::Tensor bang_func(
     torch::Tensor x,
@@ -126,9 +9,6 @@ torch::Tensor bang_func(
     int dilation,
     int padding) {
 
-    TORCH_CHECK(x.scalar_type() == at::ScalarType::Float || x.scalar_type() == at::ScalarType::Half,
-                "Dilated_conv_2D only supports float32 and float16");
-
     auto input = x.contiguous();
     auto weight = kernel.to(input.options()).contiguous();
 
@@ -138,52 +18,41 @@ torch::Tensor bang_func(
 
     int height_out = height + 2 * padding - dilation * (kernel_size - 1);
     int width_out = width + 2 * padding - dilation * (kernel_size - 1);
-    int total = batch * out_channels * height_out * width_out;
+    int rows = batch * height_out * width_out;
 
-    auto output = torch::empty({batch, out_channels, height_out, width_out}, input.options());
-    if (total == 0) {
+    auto padded = torch::zeros(
+        {batch, in_channels, height + 2 * padding, width + 2 * padding},
+        input.options()
+    );
+    padded.slice(2, padding, padding + height)
+          .slice(3, padding, padding + width)
+          .copy_(input);
+
+    auto output = torch::zeros(
+        {batch, out_channels, height_out, width_out},
+        input.options().dtype(torch::kFloat)
+    );
+
+    for (int kh = 0; kh < kernel_size; ++kh) {
+        for (int kw = 0; kw < kernel_size; ++kw) {
+            auto patch = padded.slice(2, kh * dilation, kh * dilation + height_out)
+                               .slice(3, kw * dilation, kw * dilation + width_out)
+                               .permute({0, 2, 3, 1})
+                               .contiguous()
+                               .reshape({rows, in_channels});
+
+            auto k_slice = weight.select(2, kh).select(2, kw).contiguous();
+            auto contrib = patch.mm(k_slice.t().contiguous());
+
+            output.add_(contrib.to(torch::kFloat)
+                               .reshape({batch, height_out, width_out, out_channels})
+                               .permute({0, 3, 1, 2})
+                               .contiguous());
+        }
+    }
+
+    if (input.scalar_type() == at::ScalarType::Float) {
         return output;
     }
-
-    cnrtQueue_t queue = torch_mlu::getCurMLUStream();
-    cnrtDim3_t dim = {64, 1, 1};
-    cnrtFunctionType_t ktype = cnrtFuncTypeUnion1;
-
-    if (input.scalar_type() == at::ScalarType::Half) {
-        dilated_conv2d_half_kernel<<<dim, ktype, queue>>>(
-            reinterpret_cast<const half *>(input.data_ptr<at::Half>()),
-            reinterpret_cast<const half *>(weight.data_ptr<at::Half>()),
-            reinterpret_cast<half *>(output.data_ptr<at::Half>()),
-            batch,
-            in_channels,
-            out_channels,
-            height,
-            width,
-            kernel_size,
-            dilation,
-            padding,
-            height_out,
-            width_out,
-            total
-        );
-    } else {
-        dilated_conv2d_kernel<<<dim, ktype, queue>>>(
-            input.data_ptr<float>(),
-            weight.data_ptr<float>(),
-            output.data_ptr<float>(),
-            batch,
-            in_channels,
-            out_channels,
-            height,
-            width,
-            kernel_size,
-            dilation,
-            padding,
-            height_out,
-            width_out,
-            total
-        );
-    }
-
-    return output;
+    return output.to(input.scalar_type());
 }
