@@ -1,8 +1,33 @@
 #include <bang.h>
 #include <torch/extension.h>
-#include <ATen/ops/gru.h>
 #include <vector>
 #include "framework/core/MLUStream.h"
+
+static torch::Tensor gru_cell(
+    torch::Tensor x,
+    torch::Tensor h,
+    torch::Tensor w_ih,
+    torch::Tensor w_hh,
+    torch::Tensor b_ih,
+    torch::Tensor b_hh) {
+    int hidden_size = h.size(1);
+
+    auto gi = at::addmm(b_ih, x, w_ih.t());
+    auto gh = at::addmm(b_hh, h, w_hh.t());
+
+    auto r_i = gi.narrow(1, 0, hidden_size);
+    auto z_i = gi.narrow(1, hidden_size, hidden_size);
+    auto n_i = gi.narrow(1, 2 * hidden_size, hidden_size);
+    auto r_h = gh.narrow(1, 0, hidden_size);
+    auto z_h = gh.narrow(1, hidden_size, hidden_size);
+    auto n_h = gh.narrow(1, 2 * hidden_size, hidden_size);
+
+    auto r = at::sigmoid(r_i + r_h);
+    auto z = at::sigmoid(z_i + z_h);
+    auto n = at::tanh(n_i + r * n_h);
+
+    return (1 - z) * n + z * h;
+}
 
 torch::Tensor bang_func(
     torch::Tensor x,
@@ -14,7 +39,8 @@ torch::Tensor bang_func(
 
     auto input = x.contiguous();
     auto options = input.options();
-    int batch_size = input.size(0);
+    int batch = input.size(0);
+    int seq = input.size(1);
 
     auto w_ih_l0 = torch::randn({3 * hidden_size, input_size}, options);
     auto w_hh_l0 = torch::randn({3 * hidden_size, hidden_size}, options);
@@ -25,10 +51,21 @@ torch::Tensor bang_func(
     auto b_ih_l1 = torch::randn({3 * hidden_size}, options);
     auto b_hh_l1 = torch::randn({3 * hidden_size}, options);
 
-    auto hx = torch::zeros({num_layers, batch_size, hidden_size}, options);
-    std::vector<torch::Tensor> params = {
-        w_ih_l0, w_hh_l0, b_ih_l0, b_hh_l0,
-        w_ih_l1, w_hh_l1, b_ih_l1, b_hh_l1};
-    auto result = at::gru(input, hx, params, true, num_layers, 0.0, false, false, true);
-    return std::get<0>(result);
+    // Layer 0
+    auto h_l0 = torch::zeros({batch, hidden_size}, options);
+    auto out_l0 = torch::zeros({batch, seq, hidden_size}, options);
+    for (int t = 0; t < seq; t++) {
+        h_l0 = gru_cell(input.select(1, t), h_l0, w_ih_l0, w_hh_l0, b_ih_l0, b_hh_l0);
+        out_l0.select(1, t).copy_(h_l0);
+    }
+
+    // Layer 1
+    auto h_l1 = torch::zeros({batch, hidden_size}, options);
+    auto out_l1 = torch::zeros({batch, seq, hidden_size}, options);
+    for (int t = 0; t < seq; t++) {
+        h_l1 = gru_cell(out_l0.select(1, t), h_l1, w_ih_l1, w_hh_l1, b_ih_l1, b_hh_l1);
+        out_l1.select(1, t).copy_(h_l1);
+    }
+
+    return out_l1;
 }
