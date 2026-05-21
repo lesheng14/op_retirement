@@ -18,38 +18,25 @@ torch::Tensor bang_func(
 
     int height_out = height + 2 * padding - dilation * (kernel_size - 1);
     int width_out = width + 2 * padding - dilation * (kernel_size - 1);
-    int rows = batch * height_out * width_out;
-    int cols = in_channels * kernel_size * kernel_size;
 
-    auto padded = torch::zeros(
-        {batch, in_channels, height + 2 * padding, width + 2 * padding},
-        input.options()
+    auto cols = at::im2col(
+        input,
+        {kernel_size, kernel_size},
+        {dilation, dilation},
+        {padding, padding},
+        {1, 1}
     );
-    padded.slice(2, padding, padding + height)
-          .slice(3, padding, padding + width)
-          .copy_(input);
 
-    auto im2col = torch::empty({rows, cols}, input.options());
-    auto weight_flat = torch::empty({cols, out_channels}, weight.options());
+    auto weight_2d = weight.reshape({out_channels, in_channels * kernel_size * kernel_size});
 
-    for (int kh = 0; kh < kernel_size; ++kh) {
-        for (int kw = 0; kw < kernel_size; ++kw) {
-            int col0 = (kh * kernel_size + kw) * in_channels;
+    auto cols_2d = cols.permute({1, 0, 2})
+                       .reshape({in_channels * kernel_size * kernel_size, batch * height_out * width_out});
 
-            auto patch = padded.slice(2, kh * dilation, kh * dilation + height_out)
-                               .slice(3, kw * dilation, kw * dilation + width_out)
-                               .permute({0, 2, 3, 1})
-                               .contiguous()
-                               .reshape({rows, in_channels});
-            im2col.slice(1, col0, col0 + in_channels).copy_(patch);
+    auto output_2d = weight_2d.mm(cols_2d);
 
-            auto k_slice = weight.select(2, kh).select(2, kw).t().contiguous();
-            weight_flat.slice(0, col0, col0 + in_channels).copy_(k_slice);
-        }
-    }
+    auto output = output_2d.reshape({out_channels, batch, height_out * width_out})
+                           .permute({1, 0, 2})
+                           .reshape({batch, out_channels, height_out, width_out});
 
-    auto out_mat = im2col.mm(weight_flat);
-    return out_mat.reshape({batch, height_out, width_out, out_channels})
-                  .permute({0, 3, 1, 2})
-                  .contiguous();
+    return output.to(torch::kFloat);
 }
