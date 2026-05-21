@@ -11,14 +11,16 @@ torch::Tensor bang_func(
     int dilation,
     int padding) {
 
-    auto input = x.contiguous();
-    auto weight = kernel.contiguous();
+    auto input = x.clone();
+    auto weight = kernel.clone();
     int batch = input.size(0);
     int H = input.size(2);
     int W = input.size(3);
 
     int H_out = (H + 2 * padding - dilation * (kernel_size - 1) - 1) + 1;
     int W_out = (W + 2 * padding - dilation * (kernel_size - 1) - 1) + 1;
+    int N = batch * H_out * W_out;
+    int K2 = kernel_size * kernel_size;
 
     auto padded = torch::zeros({batch, in_channels, H + 2 * padding, W + 2 * padding}, input.options());
     padded.slice(2, padding, padding + H).slice(3, padding, padding + W).copy_(input);
@@ -27,22 +29,17 @@ torch::Tensor bang_func(
 
     for (int kh = 0; kh < kernel_size; kh++) {
         for (int kw = 0; kw < kernel_size; kw++) {
-            auto inp_slice = padded.slice(2, kh * dilation, kh * dilation + H_out)
-                                   .slice(3, kw * dilation, kw * dilation + W_out)
-                                   .contiguous();
+            auto patch = padded.slice(2, kh * dilation, kh * dilation + H_out)
+                               .slice(3, kw * dilation, kw * dilation + W_out)
+                               .clone();
+            auto inp_mat = patch.permute({0, 2, 3, 1}).clone().reshape({N, in_channels});
 
-            auto inp_mat = inp_slice.permute({0, 2, 3, 1})
-                                   .contiguous()
-                                   .reshape({batch * H_out * W_out, in_channels});
+            auto k_slice = weight.select(2, kh).select(2, kw).clone();
 
-            auto k_slice = weight.select(2, kh).select(2, kw).contiguous();
-
-            auto contrib = inp_mat.mm(k_slice.t());
-            contrib = contrib.reshape({batch, H_out, W_out, out_channels})
-                             .permute({0, 3, 1, 2})
-                             .contiguous();
-
-            output.add_(contrib);
+            auto contrib = inp_mat.mm(k_slice.t().clone());
+            output.add_(contrib.reshape({batch, H_out, W_out, out_channels})
+                              .permute({0, 3, 1, 2})
+                              .clone());
         }
     }
 
