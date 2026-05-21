@@ -17,6 +17,7 @@ torch::Tensor bang_func(
     TORCH_CHECK(groups == 1 && !bias, "conv_transpose2d basic task expects groups=1 and bias=false");
 
     auto input = x.contiguous();
+    auto weight = kernel.contiguous();
     int batch = input.size(0);
     int H = input.size(2);
     int W = input.size(3);
@@ -24,17 +25,19 @@ torch::Tensor bang_func(
     int H_out = (H - 1) * stride - 2 * padding + kernel_size + output_padding;
     int W_out = (W - 1) * stride - 2 * padding + kernel_size + output_padding;
 
-    auto output = input.new_zeros({batch, out_channels, H_out, W_out});
+    auto output = torch::zeros({batch, out_channels, H_out, W_out}, input.options());
 
     for (int kh = 0; kh < kernel_size; kh++) {
         for (int kw = 0; kw < kernel_size; kw++) {
-            auto k_slice = kernel.select(2, kh).select(2, kw).contiguous();
+            auto k_slice = weight.select(2, kh).select(2, kw).contiguous();
 
             auto inp = input.permute({0, 2, 3, 1})
                            .contiguous()
                            .reshape({batch * H * W, in_channels});
             auto contrib = inp.mm(k_slice);
-            contrib = contrib.reshape({batch, H, W, out_channels}).contiguous();
+            contrib = contrib.reshape({batch, H, W, out_channels})
+                           .permute({0, 3, 1, 2})
+                           .contiguous();
 
             int off_h = kh - padding;
             int off_w = kw - padding;
@@ -49,18 +52,16 @@ torch::Tensor bang_func(
             int h_count = h_end - h_start + 1;
             int w_count = w_end - w_start + 1;
 
+            auto valid = contrib.slice(2, h_start, h_start + h_count)
+                               .slice(3, w_start, w_start + w_count)
+                               .contiguous();
+
             int out_h0 = h_start * stride + off_h;
             int out_w0 = w_start * stride + off_w;
 
-            for (int i = 0; i < h_count; i++) {
-                int oh = out_h0 + i * stride;
-                for (int j = 0; j < w_count; j++) {
-                    int ow = out_w0 + j * stride;
-                    output.select(2, oh).select(2, ow)
-                          .add_(contrib.select(1, h_start + i)
-                                       .select(1, w_start + j));
-                }
-            }
+            output.slice(2, out_h0, out_h0 + (h_count - 1) * stride + 1, stride)
+                  .slice(3, out_w0, out_w0 + (w_count - 1) * stride + 1, stride)
+                  .add_(valid);
         }
     }
 
