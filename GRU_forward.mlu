@@ -31,6 +31,14 @@ static torch::Tensor gru_cell(
 
 torch::Tensor bang_func(
     torch::Tensor x,
+    torch::Tensor weight_ih_l0,
+    torch::Tensor weight_hh_l0,
+    torch::Tensor bias_ih_l0,
+    torch::Tensor bias_hh_l0,
+    torch::Tensor weight_ih_l1,
+    torch::Tensor weight_hh_l1,
+    torch::Tensor bias_ih_l1,
+    torch::Tensor bias_hh_l1,
     int input_size,
     int hidden_size,
     int num_layers) {
@@ -38,30 +46,20 @@ torch::Tensor bang_func(
     TORCH_CHECK(x.dim() == 3, "GRU_forward expects [batch, seq, input_size]");
 
     auto input = x.contiguous();
-    auto options = input.options();
     int batch = input.size(0);
     int seq = input.size(1);
 
-    auto w_ih_l0 = torch::randn({3 * hidden_size, input_size}, options);
-    auto w_hh_l0 = torch::randn({3 * hidden_size, hidden_size}, options);
-    auto b_ih_l0 = torch::randn({3 * hidden_size}, options);
-    auto b_hh_l0 = torch::randn({3 * hidden_size}, options);
-    auto w_ih_l1 = torch::randn({3 * hidden_size, hidden_size}, options);
-    auto w_hh_l1 = torch::randn({3 * hidden_size, hidden_size}, options);
-    auto b_ih_l1 = torch::randn({3 * hidden_size}, options);
-    auto b_hh_l1 = torch::randn({3 * hidden_size}, options);
-
-    auto h_l0 = torch::zeros({batch, hidden_size}, options);
-    auto out_l0 = torch::zeros({batch, seq, hidden_size}, options);
+    auto h_l0 = torch::zeros({batch, hidden_size}, input.options());
+    auto out_l0 = torch::zeros({batch, seq, hidden_size}, input.options());
     for (int t = 0; t < seq; t++) {
-        h_l0 = gru_cell(input.select(1, t), h_l0, w_ih_l0, w_hh_l0, b_ih_l0, b_hh_l0);
+        h_l0 = gru_cell(input.select(1, t), h_l0, weight_ih_l0, weight_hh_l0, bias_ih_l0, bias_hh_l0);
         out_l0.select(1, t).copy_(h_l0);
     }
 
-    auto h_l1 = torch::zeros({batch, hidden_size}, options);
-    auto out_l1 = torch::zeros({batch, seq, hidden_size}, options);
+    auto h_l1 = torch::zeros({batch, hidden_size}, input.options());
+    auto out_l1 = torch::zeros({batch, seq, hidden_size}, input.options());
     for (int t = 0; t < seq; t++) {
-        h_l1 = gru_cell(out_l0.select(1, t), h_l1, w_ih_l1, w_hh_l1, b_ih_l1, b_hh_l1);
+        h_l1 = gru_cell(out_l0.select(1, t), h_l1, weight_ih_l1, weight_hh_l1, bias_ih_l1, bias_hh_l1);
         out_l1.select(1, t).copy_(h_l1);
     }
 
