@@ -1,0 +1,43 @@
+#include <bang.h>
+#include <torch/extension.h>
+#include <vector>
+#include "framework/core/MLUStream.h"
+
+torch::Tensor bang_func(
+    torch::Tensor x,
+    torch::Tensor kernel,
+    int in_channels,
+    int out_channels,
+    int kernel_size,
+    int dilation,
+    int padding) {
+
+    auto input = x.contiguous();
+    int batch = input.size(0);
+    int H = input.size(2);
+    int W = input.size(3);
+
+    int H_out = (H + 2 * padding - dilation * (kernel_size - 1) - 1) + 1;
+    int W_out = (W + 2 * padding - dilation * (kernel_size - 1) - 1) + 1;
+
+    auto padded = torch::constant_pad_nd(input, {padding, padding, padding, padding}, 0);
+
+    std::vector<torch::Tensor> patches;
+    for (int kh = 0; kh < kernel_size; kh++) {
+        for (int kw = 0; kw < kernel_size; kw++) {
+            auto p = padded.slice(2, kh * dilation, kh * dilation + H_out)
+                          .slice(3, kw * dilation, kw * dilation + W_out);
+            patches.push_back(p.unsqueeze(1));
+        }
+    }
+
+    auto cols = torch::cat(patches, 1);
+    auto cols_t = cols.permute({0, 2, 3, 1});
+    auto cols_mat = cols_t.reshape({batch * H_out * W_out, in_channels * kernel_size * kernel_size});
+
+    auto kernel_mat = kernel.reshape({out_channels, in_channels * kernel_size * kernel_size});
+    auto out_mat = cols_mat.mm(kernel_mat.t());
+    auto output = out_mat.reshape({batch, H_out, W_out, out_channels}).permute({0, 3, 1, 2});
+
+    return output.contiguous();
+}
