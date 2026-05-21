@@ -19,22 +19,30 @@ torch::Tensor bang_func(
     int H_out = (H + 2 * padding - dilation * (kernel_size - 1) - 1) + 1;
     int W_out = (W + 2 * padding - dilation * (kernel_size - 1) - 1) + 1;
 
-    auto padded = torch::zeros({batch, in_channels, H + 2 * padding, W + 2 * padding}, input.options());
+    auto padded = input.new_zeros({batch, in_channels, H + 2 * padding, W + 2 * padding});
     padded.slice(2, padding, padding + H).slice(3, padding, padding + W).copy_(input);
 
-    auto output = torch::zeros({batch, out_channels, H_out, W_out}, input.options());
+    auto output = input.new_zeros({batch, out_channels, H_out, W_out});
+
+    int K2 = kernel_size * kernel_size;
+    int spatial_out = H_out * W_out;
 
     for (int kh = 0; kh < kernel_size; kh++) {
         for (int kw = 0; kw < kernel_size; kw++) {
             auto inp_slice = padded.slice(2, kh * dilation, kh * dilation + H_out)
-                                   .slice(3, kw * dilation, kw * dilation + W_out);
+                                   .slice(3, kw * dilation, kw * dilation + W_out)
+                                   .contiguous();
 
-            auto inp_mat = inp_slice.permute({0, 2, 3, 1}).reshape({batch * H_out * W_out, in_channels});
+            auto inp_mat = inp_slice.permute({0, 2, 3, 1})
+                                   .contiguous()
+                                   .reshape({batch * spatial_out, in_channels});
 
-            auto k_slice = kernel.select(2, kh).select(2, kw);
+            auto k_slice = kernel.select(2, kh).select(2, kw).contiguous();
 
             auto contrib = inp_mat.mm(k_slice.t());
-            contrib = contrib.reshape({batch, H_out, W_out, out_channels}).permute({0, 3, 1, 2});
+            contrib = contrib.reshape({batch, H_out, W_out, out_channels})
+                             .permute({0, 3, 1, 2})
+                             .contiguous();
 
             output.add_(contrib);
         }
