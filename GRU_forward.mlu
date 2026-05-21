@@ -12,8 +12,8 @@ static torch::Tensor gru_cell(
     torch::Tensor b_hh) {
     int hidden_size = h.size(1);
 
-    auto gi = at::addmm(b_ih, x, w_ih.t());
-    auto gh = at::addmm(b_hh, h, w_hh.t());
+    auto gi = x.mm(w_ih.t()).add(b_ih);
+    auto gh = h.mm(w_hh.t()).add(b_hh);
 
     auto r_i = gi.narrow(1, 0, hidden_size);
     auto z_i = gi.narrow(1, hidden_size, hidden_size);
@@ -22,9 +22,9 @@ static torch::Tensor gru_cell(
     auto z_h = gh.narrow(1, hidden_size, hidden_size);
     auto n_h = gh.narrow(1, 2 * hidden_size, hidden_size);
 
-    auto r = at::sigmoid(r_i + r_h);
-    auto z = at::sigmoid(z_i + z_h);
-    auto n = at::tanh(n_i + r * n_h);
+    auto r = (r_i + r_h).sigmoid();
+    auto z = (z_i + z_h).sigmoid();
+    auto n = (n_i + r * n_h).tanh();
 
     return (1 - z) * n + z * h;
 }
@@ -51,7 +51,6 @@ torch::Tensor bang_func(
     auto b_ih_l1 = torch::randn({3 * hidden_size}, options);
     auto b_hh_l1 = torch::randn({3 * hidden_size}, options);
 
-    // Layer 0
     auto h_l0 = torch::zeros({batch, hidden_size}, options);
     auto out_l0 = torch::zeros({batch, seq, hidden_size}, options);
     for (int t = 0; t < seq; t++) {
@@ -59,7 +58,6 @@ torch::Tensor bang_func(
         out_l0.select(1, t).copy_(h_l0);
     }
 
-    // Layer 1
     auto h_l1 = torch::zeros({batch, hidden_size}, options);
     auto out_l1 = torch::zeros({batch, seq, hidden_size}, options);
     for (int t = 0; t < seq; t++) {
