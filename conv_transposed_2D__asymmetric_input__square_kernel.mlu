@@ -33,24 +33,33 @@ torch::Tensor bang_func(
     const float* p_weight = weight.data_ptr<float>();
     float* p_output = output.data_ptr<float>();
 
+    int HW = height * width;
+    int KH = kernel_size;
+    int KW = kernel_size;
+    int OC = out_channels;
+    int IC = in_channels;
+    int HoW_out = height_out * width_out;
+
     #pragma omp parallel for collapse(2)
     for (int b = 0; b < batch; ++b) {
-        for (int oc = 0; oc < out_channels; ++oc) {
+        for (int oc = 0; oc < OC; ++oc) {
             for (int i = 0; i < height; ++i) {
                 for (int j = 0; j < width; ++j) {
-                    for (int kh = 0; kh < kernel_size; ++kh) {
+                    for (int kh = 0; kh < KH; ++kh) {
                         int oH = i * stride + kh - padding;
                         if (oH < 0 || oH >= height_out) continue;
-                        for (int kw = 0; kw < kernel_size; ++kw) {
+                        for (int kw = 0; kw < KW; ++kw) {
                             int oW = j * stride + kw - padding;
                             if (oW < 0 || oW >= width_out) continue;
                             float sum = 0.0f;
-                            const float* p_in = p_input + b * in_channels * height * width + i * width + j;
-                            const float* p_w = p_weight + kh * kernel_size * out_channels + kw * out_channels + oc;
-                            for (int ic = 0; ic < in_channels; ++ic) {
-                                sum += p_in[ic * height * width] * p_w[ic * kernel_size * kernel_size * out_channels];
+                            // weight layout: (IC, OC, KH, KW)
+                            // weight[ic][oc][kh][kw] = p_weight[ic*OC*KH*KW + oc*KH*KW + kh*KW + kw]
+                            const float* p_in = p_input + b * IC * HW + i * width + j;
+                            const float* p_w = p_weight + oc * KH * KW + kh * KW + kw;
+                            for (int ic = 0; ic < IC; ++ic) {
+                                sum += p_in[ic * HW] * p_w[ic * OC * KH * KW];
                             }
-                            p_output[b * out_channels * height_out * width_out + oc * height_out * width_out + oH * width_out + oW] += sum;
+                            p_output[b * OC * HoW_out + oc * HoW_out + oH * width_out + oW] += sum;
                         }
                     }
                 }
