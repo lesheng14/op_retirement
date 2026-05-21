@@ -1,6 +1,73 @@
+#include <bang.h>
 #include <torch/extension.h>
-#include <algorithm>
+#include <cnrt.h>
 #include "framework/core/MLUStream.h"
+
+__mlu_entry__ void conv_transpose2d_kernel(
+    const float *input,
+    const float *weight,
+    float *output,
+    int batch,
+    int in_channels,
+    int out_channels,
+    int height,
+    int width,
+    int kernel_size,
+    int stride,
+    int padding,
+    int height_out,
+    int width_out,
+    int total) {
+
+    int task_id = taskId;
+    int task_num = taskDim;
+    int per_task = total / task_num;
+    int remainder = total % task_num;
+    int start = task_id * per_task + (task_id < remainder ? task_id : remainder);
+    int count = per_task + (task_id < remainder ? 1 : 0);
+    int end = start + count;
+
+    for (int idx = start; idx < end; ++idx) {
+        int t = idx;
+        int ow = t % width_out;
+        t /= width_out;
+        int oh = t % height_out;
+        t /= height_out;
+        int oc = t % out_channels;
+        int n = t / out_channels;
+
+        float acc = 0.0f;
+        for (int ic = 0; ic < in_channels; ++ic) {
+            for (int kh = 0; kh < kernel_size; ++kh) {
+                int ih_unstrided = oh + padding - kh;
+                if (ih_unstrided < 0 || ih_unstrided % stride != 0) {
+                    continue;
+                }
+                int ih = ih_unstrided / stride;
+                if (ih < 0 || ih >= height) {
+                    continue;
+                }
+
+                for (int kw = 0; kw < kernel_size; ++kw) {
+                    int iw_unstrided = ow + padding - kw;
+                    if (iw_unstrided < 0 || iw_unstrided % stride != 0) {
+                        continue;
+                    }
+                    int iw = iw_unstrided / stride;
+                    if (iw < 0 || iw >= width) {
+                        continue;
+                    }
+
+                    int input_offset = ((n * in_channels + ic) * height + ih) * width + iw;
+                    int weight_offset = ((ic * out_channels + oc) * kernel_size + kh) * kernel_size + kw;
+                    acc += input[input_offset] * weight[weight_offset];
+                }
+            }
+        }
+
+        output[idx] = acc;
+    }
+}
 
 torch::Tensor bang_func(
     torch::Tensor x,
@@ -14,55 +81,46 @@ torch::Tensor bang_func(
     int groups,
     bool bias) {
 
-    TORCH_CHECK(groups == 1 && !bias, "conv_transpose2d basic task expects groups=1 and bias=false");
+    TORCH_CHECK(groups == 1 && !bias, "conv_transpose2d task expects groups=1 and bias=false");
+    TORCH_CHECK(x.scalar_type() == at::ScalarType::Float, "conv_transpose2d only supports float32 input");
+    TORCH_CHECK(kernel.scalar_type() == at::ScalarType::Float, "conv_transpose2d only supports float32 kernel");
 
-    auto input = x.clone();
-    auto weight = kernel.clone();
+    auto input = x.contiguous();
+    auto weight = kernel.contiguous();
+
     int batch = input.size(0);
-    int H = input.size(2);
-    int W = input.size(3);
+    int height = input.size(2);
+    int width = input.size(3);
 
-    int H_out = (H - 1) * stride - 2 * padding + kernel_size + output_padding;
-    int W_out = (W - 1) * stride - 2 * padding + kernel_size + output_padding;
-    int N = batch * H * W;
+    int height_out = (height - 1) * stride - 2 * padding + kernel_size + output_padding;
+    int width_out = (width - 1) * stride - 2 * padding + kernel_size + output_padding;
+    int total = batch * out_channels * height_out * width_out;
 
-    auto output = torch::zeros({batch, out_channels, H_out, W_out}, input.options());
-
-    for (int kh = 0; kh < kernel_size; kh++) {
-        for (int kw = 0; kw < kernel_size; kw++) {
-            auto k_slice = weight.select(2, kh).select(2, kw).clone();
-
-            auto inp_flat = input.permute({0, 2, 3, 1}).clone().reshape({N, in_channels});
-            auto contrib = inp_flat.mm(k_slice.t().clone());
-            contrib = contrib.reshape({batch, H, W, out_channels})
-                           .permute({0, 3, 1, 2})
-                           .clone();
-
-            int off_h = kh - padding;
-            int off_w = kw - padding;
-
-            int h_start = std::max(0, (0 - off_h + stride - 1) / stride);
-            int h_end   = std::min(H - 1, (H_out - 1 - off_h) / stride);
-            int w_start = std::max(0, (0 - off_w + stride - 1) / stride);
-            int w_end   = std::min(W - 1, (W_out - 1 - off_w) / stride);
-
-            if (h_start > h_end || w_start > w_end) continue;
-
-            int h_count = h_end - h_start + 1;
-            int w_count = w_end - w_start + 1;
-
-            auto valid = contrib.slice(2, h_start, h_start + h_count)
-                               .slice(3, w_start, w_start + w_count)
-                               .clone();
-
-            int out_h0 = h_start * stride + off_h;
-            int out_w0 = w_start * stride + off_w;
-
-            output.slice(2, out_h0, out_h0 + (h_count - 1) * stride + 1, stride)
-                  .slice(3, out_w0, out_w0 + (w_count - 1) * stride + 1, stride)
-                  .add_(valid);
-        }
+    auto output = torch::empty({batch, out_channels, height_out, width_out}, input.options());
+    if (total == 0) {
+        return output;
     }
+
+    cnrtQueue_t queue = torch_mlu::getCurMLUStream();
+    cnrtDim3_t dim = {64, 1, 1};
+    cnrtFunctionType_t ktype = cnrtFuncTypeUnion1;
+
+    conv_transpose2d_kernel<<<dim, ktype, queue>>>(
+        input.data_ptr<float>(),
+        weight.data_ptr<float>(),
+        output.data_ptr<float>(),
+        batch,
+        in_channels,
+        out_channels,
+        height,
+        width,
+        kernel_size,
+        stride,
+        padding,
+        height_out,
+        width_out,
+        total
+    );
 
     return output;
 }
