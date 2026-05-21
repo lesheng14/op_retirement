@@ -1,0 +1,73 @@
+#include <torch/extension.h>
+#include <cnrt.h>
+#include <cnnl.h>
+#include "framework/core/MLUStream.h"
+
+#define CHECK_CNNL(call) TORCH_CHECK((call) == CNNL_STATUS_SUCCESS, "CNNL call failed")
+#define CHECK_CNRT(call) TORCH_CHECK((call) == cnrtSuccess, "CNRT call failed")
+
+torch::Tensor bang_func(torch::Tensor x, torch::Tensor kernel, int in_channels, int out_channels, int kernel_size, int stride, int padding, int output_padding, int groups, bool bias) {
+    TORCH_CHECK(groups == 1 && !bias, "conv_transpose2d basic task expects groups=1 and bias=false");
+    TORCH_CHECK(x.scalar_type() == at::ScalarType::Half, "conv_transpose2d basic task expects float16");
+
+    auto input = x.permute({0, 2, 3, 1}).contiguous().to(torch::kFloat);
+    auto weight = kernel.permute({2, 3, 1, 0}).contiguous().to(torch::kFloat);
+    int batch = x.size(0), h = x.size(2), w = x.size(3);
+    int out_h = (h - 1) * stride - 2 * padding + kernel_size + output_padding;
+    int out_w = (w - 1) * stride - 2 * padding + kernel_size + output_padding;
+    auto output_nhwc = torch::empty({batch, out_h, out_w, out_channels}, x.options().dtype(torch::kFloat));
+
+    cnnlHandle_t handle;
+    CHECK_CNNL(cnnlCreate(&handle));
+    cnrtQueue_t queue = torch_mlu::getCurMLUStream();
+    CHECK_CNNL(cnnlSetQueue(handle, queue));
+
+    cnnlTensorDescriptor_t x_desc, w_desc, y_desc;
+    cnnlDeconvolutionDescriptor_t deconv_desc;
+    CHECK_CNNL(cnnlCreateTensorDescriptor(&x_desc));
+    CHECK_CNNL(cnnlCreateTensorDescriptor(&w_desc));
+    CHECK_CNNL(cnnlCreateTensorDescriptor(&y_desc));
+    CHECK_CNNL(cnnlCreateDeconvolutionDescriptor(&deconv_desc));
+
+    int x_dims[4] = {batch, h, w, in_channels};
+    int w_dims[4] = {kernel_size, kernel_size, out_channels, in_channels};
+    int y_dims[4] = {batch, out_h, out_w, out_channels};
+    CHECK_CNNL(cnnlSetTensorDescriptor(x_desc, CNNL_LAYOUT_NHWC, CNNL_DTYPE_FLOAT, 4, x_dims));
+    CHECK_CNNL(cnnlSetTensorDescriptor(w_desc, CNNL_LAYOUT_HWCN, CNNL_DTYPE_FLOAT, 4, w_dims));
+    CHECK_CNNL(cnnlSetTensorDescriptor(y_desc, CNNL_LAYOUT_NHWC, CNNL_DTYPE_FLOAT, 4, y_dims));
+
+    int pads[4] = {padding, padding, padding, padding};
+    int strides[2] = {stride, stride};
+    int dilations[2] = {1, 1};
+    CHECK_CNNL(cnnlSetDeconvolutionDescriptor(deconv_desc, 4, pads, strides, dilations, groups, CNNL_DTYPE_FLOAT));
+
+    cnnlDeconvolutionAlgo_t algo;
+    CHECK_CNNL(cnnlGetDeconvolutionAlgo(handle, x_desc, w_desc, nullptr, deconv_desc, y_desc, CNNL_CONVOLUTION_BWD_DATA_FASTEST, &algo));
+    size_t workspace_size = 0;
+    CHECK_CNNL(cnnlGetDeconvolutionWorkspaceSize_v2(handle, x_desc, w_desc, nullptr, deconv_desc, y_desc, algo, &workspace_size));
+    void *workspace = nullptr;
+    if (workspace_size > 0) {
+        CHECK_CNRT(cnrtMalloc(&workspace, workspace_size));
+    }
+
+    CHECK_CNNL(cnnlDeconvolution(
+        handle, nullptr,
+        x_desc, input.data_ptr<float>(),
+        w_desc, weight.data_ptr<float>(),
+        nullptr, nullptr,
+        deconv_desc, algo,
+        workspace, workspace_size,
+        nullptr,
+        y_desc, output_nhwc.data_ptr<float>()));
+
+    if (workspace != nullptr) {
+        cnrtFree(workspace);
+    }
+    cnnlDestroyDeconvolutionDescriptor(deconv_desc);
+    cnnlDestroyTensorDescriptor(x_desc);
+    cnnlDestroyTensorDescriptor(w_desc);
+    cnnlDestroyTensorDescriptor(y_desc);
+    cnnlDestroy(handle);
+
+    return output_nhwc.permute({0, 3, 1, 2}).contiguous();
+}
