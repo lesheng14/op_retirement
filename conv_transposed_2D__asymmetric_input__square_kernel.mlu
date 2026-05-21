@@ -67,8 +67,5 @@ torch::Tensor bang_func(
         }
     }
 
-    if (input.scalar_type() == at::ScalarType::Float) {
-        return output;
-    }
-    return output.to(input.scalar_type());
+    return output;
 }
