@@ -9,8 +9,8 @@ torch::Tensor bang_func(
     int dilation,
     int padding) {
 
-    auto input = x.contiguous();
-    auto weight = kernel.to(input.options()).contiguous();
+    auto input = x.contiguous().to(torch::kFloat).cpu();
+    auto weight = kernel.contiguous().to(torch::kFloat).cpu();
 
     int batch = input.size(0);
     int height = input.size(2);
@@ -19,24 +19,48 @@ torch::Tensor bang_func(
     int height_out = height + 2 * padding - dilation * (kernel_size - 1);
     int width_out = width + 2 * padding - dilation * (kernel_size - 1);
 
-    auto cols = at::im2col(
-        input,
-        {kernel_size, kernel_size},
-        {dilation, dilation},
-        {padding, padding},
-        {1, 1}
+    auto padded = torch::zeros(
+        {batch, in_channels, height + 2 * padding, width + 2 * padding},
+        torch::kFloat
+    );
+    padded.slice(2, padding, padding + height)
+          .slice(3, padding, padding + width)
+          .copy_(input);
+
+    auto output = torch::zeros(
+        {batch, out_channels, height_out, width_out},
+        torch::kFloat
     );
 
-    auto weight_2d = weight.reshape({out_channels, in_channels * kernel_size * kernel_size});
+    int Hp = height + 2 * padding;
+    int Wp = width + 2 * padding;
 
-    auto cols_2d = cols.permute({1, 0, 2})
-                       .reshape({in_channels * kernel_size * kernel_size, batch * height_out * width_out});
+    const float* p_padded = padded.data_ptr<float>();
+    const float* p_weight = weight.data_ptr<float>();
+    float* p_output = output.data_ptr<float>();
 
-    auto output_2d = weight_2d.mm(cols_2d);
+    #pragma omp parallel for collapse(2)
+    for (int b = 0; b < batch; ++b) {
+        for (int oc = 0; oc < out_channels; ++oc) {
+            for (int oh = 0; oh < height_out; ++oh) {
+                for (int ow = 0; ow < width_out; ++ow) {
+                    float sum = 0.0f;
+                    for (int kh = 0; kh < kernel_size; ++kh) {
+                        for (int kw = 0; kw < kernel_size; ++kw) {
+                            int ih = oh + kh * dilation;
+                            int iw = ow + kw * dilation;
+                            const float* p_in = p_padded + b * in_channels * Hp * Wp + ih * Wp + iw;
+                            const float* p_w = p_weight + oc * in_channels * kernel_size * kernel_size + kh * kernel_size + kw;
+                            for (int ic = 0; ic < in_channels; ++ic) {
+                                sum += p_in[ic * Hp * Wp] * p_w[ic * kernel_size * kernel_size];
+                            }
+                        }
+                    }
+                    p_output[b * out_channels * height_out * width_out + oc * height_out * width_out + oh * width_out + ow] = sum;
+                }
+            }
+        }
+    }
 
-    auto output = output_2d.reshape({out_channels, batch, height_out * width_out})
-                           .permute({1, 0, 2})
-                           .reshape({batch, out_channels, height_out, width_out});
-
-    return output.to(torch::kFloat);
+    return output;
 }
