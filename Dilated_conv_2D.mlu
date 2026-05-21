@@ -20,7 +20,8 @@ torch::Tensor bang_func(
     int H_out = (H + 2 * padding - dilation * (kernel_size - 1) - 1) + 1;
     int W_out = (W + 2 * padding - dilation * (kernel_size - 1) - 1) + 1;
 
-    auto padded = torch::constant_pad_nd(input, {padding, padding, padding, padding}, 0);
+    auto padded = torch::zeros({batch, in_channels, H + 2 * padding, W + 2 * padding}, input.options());
+    padded.slice(2, padding, padding + H).slice(3, padding, padding + W).copy_(input);
 
     std::vector<torch::Tensor> patches;
     for (int kh = 0; kh < kernel_size; kh++) {
